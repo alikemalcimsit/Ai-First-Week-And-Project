@@ -39,7 +39,52 @@ OpenAI API'si, modellere HTTP isteği göndererek çıktı almanı sağlayan bir
 
 ---
 
+
+
 ## OpenAI API Kullanımı
+
+### OpenAI API Endpoint'leri ve Kullanım Senaryoları
+
+| Metot / Endpoint         | Amacı                                 | Ne Zaman Kullanılır?                                                                 |
+|-------------------------|---------------------------------------|--------------------------------------------------------------------------------------|
+| chat.completions        | Karşılıklı mesajlaşma (Chat)           | Tüm metin bazlı işler: öneri, analiz, özetleme, sohbet, asistan, chatbot             |
+| images.generate         | Görsel oluşturma (DALL-E)              | "Bana içinde tavuk olan bir tabak resmi çiz" gibi görsel üretim isteklerinde         |
+| audio.transcriptions    | Sesi metne çevirme (Whisper)           | Kullanıcı yazmak yerine ses kaydı gönderirse, sesi yazıya çevirmek için               |
+| embeddings              | Metni sayısal vektöre çevirme          | Büyük bir tarif/ürün/mesaj kütüphanesinde benzerlik araması veya öneri sistemi için   |
+| files / fineTuning      | Modeli eğitme                          | AI'yı sadece kendi özel yemek kitabın veya verinle eğitmek/kısıtlamak istersen        |
+
+
+### OpenAI JavaScript SDK ile Kullanım (openai npm paketi)
+
+OpenAI'nin resmi JavaScript/TypeScript SDK'sı ile modern ve kolay bir şekilde API'ye erişebilirsin. (npm paketi: `openai`)
+
+#### Kurulum
+```bash
+npm install openai
+```
+
+#### Basit Kullanım
+```javascript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: "OPENAI_API_KEY", // .env ile de alınabilir
+  dangerouslyAllowBrowser: true // Frontend'de test için
+});
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4o",
+  messages: [
+    { role: "system", content: "Sen yemek önerisi yapan bir asistansın." },
+    { role: "user", content: "Ben mantar sevmem, pizza severim." }
+  ],
+  temperature: 0.7
+});
+
+console.log(response.choices[0].message.content);
+```
+
+> **Not:** Frontend'de test için `dangerouslyAllowBrowser: true` gerekir. Gerçek projede API anahtarını asla client-side'da tutma!
 
 ### Temel Fetch İsteği (JavaScript)
 
@@ -567,7 +612,256 @@ netlify deploy --prod
 
 ---
 
-## Projeler
+
+
+## Integration: CRM Sohbet Analizi (chatAnalyze.js)
+
+
+### Örnek Sohbet (Konuşma Formatı)
+
+```
+Müşteri: Merhaba kolay gelsin
+Müşteri: Sgk anlaşmalı muayene ücretiniz nedir acaba Mustafa Bey için (ortopedi)
+Çalışan: merhaba caner bey
+Çalışan: şuanda kampanyamız mevcut mustafa beyin şuanda sgk 2000 tl'dir
+Müşteri: Tamamdır teşekkürler sağ olun.
+Çalışan: sağlıklı günler dilerim
+Müşteri: Teşekkürler sağ olun
+```
+
+### AI Analiz Cevabı
+
+```json
+{
+  "memnuniyet": "memnun",
+  "duygu": "mutlu",
+  "aciliyet": "düşük",
+  "konu": "Sgk anlaşmalı muayene ücreti hakkında bilgi",
+  "ozet": "Müşteri SGK anlaşmalı muayene ücretini sordu, çalışan fiyatı bildirdi.",
+  "temsilci_onerisi": "Kampanya ve fiyatlar otomatik olarak müşteri ile paylaşılmalı",
+  "aksiyon_gerekiyor_mu": false,
+}
+```
+
+Bu bölümde, CRM sisteminizdeki müşteri sohbetlerini analiz etmek için geliştirilmiş `chatAnalyze.js` dosyasının detaylı açıklamasını bulabilirsiniz. Kodun her parçası, neden o şekilde tasarlandığı ve entegrasyon mantığı ile birlikte açıklanmıştır.
+
+### Amaç
+WhatsApp gibi kanallardan gelen müşteri mesajlarını, LLM (büyük dil modeli) ile analiz ederek duygu, memnuniyet, aciliyet, özet ve aksiyon önerisi gibi çıktılar üretmek. Kod, CRM sistemine kolayca entegre edilebilecek şekilde modüler ve güvenli yazılmıştır.
+
+---
+
+### 1. Data Fetching (Veri Çekme)
+```js
+async function fetchAllMessages(chatId) {
+  try {
+    const res = await apiRequest.post("/chatlist/last-100", { chatId });
+    const messages = res?.data?.data || res?.data || res || [];
+    return Array.isArray(messages) ? messages : [];
+  } catch (error) {
+    console.error(`ChatId ${chatId} için mesajlar çekilemedi:`, error.message);
+    return [];
+  }
+}
+```
+**Açıklama:**
+- Belirli bir `chatId` için son 100 mesajı API'dan çeker.
+- Gelen veri yapısı farklı olabileceği için, güvenli şekilde diziye dönüştürülür.
+- Hata olursa boş dizi döner ve hata loglanır.
+
+**Neden böyle?**
+Farklı API cevap formatlarına karşı dayanıklı ve hata toleranslı olması için.
+
+---
+
+### 2. Safe Decode (Güvenli Çözümleme)
+```js
+function safeDecode(text) {
+  if (!text) return "";
+  try {
+    return decodeURIComponent(text.replace(/\+/g, '%20'));
+  } catch {
+    return text;
+  }
+}
+```
+**Açıklama:**
+- Mesaj metinleri bazen URL encode edilmiş gelir. Ayrıca bazı sistemler boşlukları `+` ile bırakabilir.
+- Bu fonksiyon, metni güvenli şekilde çözer. Hatalıysa orijinal metni döner.
+
+**Neden böyle?**
+Gerçek hayatta mesajlar her zaman düzgün encode edilmez. Kullanıcıya doğru metin göstermek için.
+
+---
+
+### 3. Role Detection (Rol Tespiti)
+```js
+function getRole(m) {
+  return m.status === "inbound" ? "user" : "assistant";
+}
+```
+**Açıklama:**
+- Mesajın kimden geldiğini belirler. `inbound` ise müşteri (`user`), diğer durumlar çalışan (`assistant`).
+
+**Neden böyle?**
+LLM analizinde rol ayrımı çok önemlidir. Modelin doğru bağlamda analiz yapabilmesi için.
+
+---
+
+### 4. Clean + Normalize Chat (Temizleme & Normalizasyon)
+```js
+function prepareMessages(messages) {
+  const uniqueMessagesMap = new Map();
+  messages.forEach(m => {
+    if (!uniqueMessagesMap.has(m.messageId)) {
+      uniqueMessagesMap.set(m.messageId, m);
+    }
+  });
+  return Array.from(uniqueMessagesMap.values())
+    .filter(m => m.type === "text" && m.text?.trim())
+    .sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime))
+    .map(m => ({
+      role: getRole(m),
+      content: safeDecode(m.text)
+    }));
+}
+```
+**Açıklama:**
+- Aynı mesaj birden fazla kez gelebilir, `messageId` ile tekilleştirilir.
+- Sadece dolu ve metin olan mesajlar alınır.
+- Tarihe göre sıralanır.
+- Her mesaj, LLM için uygun role ve çözümlenmiş metne dönüştürülür.
+
+**Neden böyle?**
+LLM'e gönderilecek veri temiz, sıralı ve tekrar içermemeli. Analiz doğruluğu için kritik.
+
+---
+
+
+### 5. LLM Analysis & Few-Shot Config (LLM ile Analiz ve Few-Shot Ayarı)
+```js
+async function analyzeWithLM(chatMessages) {
+  // SYSTEM PROMPT: Modelin davranışını ve çıktı formatını kesin olarak belirler
+  const systemPrompt = `
+Sen bir müşteri deneyimi ve CRM analiz AI'sısın.
+
+KURALLAR:
+- SADECE geçerli bir JSON döndür. Asla markdown veya ekstra bir açıklama metni kullanma.
+- ASLA uydurma yapma. Yalnızca sağlanan konuşma metnini analiz et.
+- Müşteri bir mağduriyet (randevu iptali, gecikme vb.) yaşamasına rağmen duruma anlayış gösterip kibar davranıyorsa (örn: "geçmiş olsun", "sorun değil"), bunu "mutlu" veya "memnun" olarak DEĞERLENDİRME. Duyguyu "sakin", memnuniyeti "nötr" olarak işaretle.
+
+ÇIKTI FORMATI:
+{
+  "memnuniyet": "memnun | nötr | memnun değil",
+  "duygu": "mutlu | sakin | sinirli | üzgün | kızgın",
+  "aciliyet": "yüksek | orta | düşük",
+  "konu": "müşterinin gerçek talebi",
+  "ozet": "gerçek olay özeti",
+  "temsilci_onerisi": "somut aksiyon",
+  "aksiyon_gerekiyor_mu": true | false,
+  "sorumlular": ["Randevu Sorumlusu", "Müşteri Temsilcisi" vb.]
+}
+`.trim();
+
+  // Sohbeti transcript formatına çevir: LLM'in bağlamı net anlaması için
+  const chatTranscript = chatMessages
+    .map(m => `${m.role === "user" ? "Müşteri" : "Çalışan"}: ${m.content}`)
+    .join("\n");
+
+  // FEW-SHOT EXAMPLES: Modelin formatı ve duygu tuzaklarını öğrenmesi için örnekler
+  const fewShotExamples = [
+    {
+      role: "user",
+      content: "Aşağıdaki sohbeti analiz et:\nMüşteri: Merhaba diş çekimi yapılabiliyor mu?\nÇalışan: Evet, bugün 20:00’a kadar hizmet veriyoruz."
+    },
+    {
+      role: "assistant",
+      content: '{\n  "memnuniyet": "nötr",\n  "duygu": "sakin",\n  "aciliyet": "orta",\n  "konu": "Diş hizmet saatleri hakkında bilgi",\n  "ozet": "Müşteri hizmetin açık olup olmadığını sordu, çalışan çalışma saatini bildirdi.",\n  "temsilci_onerisi": "Çalışma saatleri otomatik mesaj olarak optimize edilmeli",\n  "aksiyon_gerekiyor_mu": false,\n  "sorumlular": ["Randevu Sorumlusu"]\n}'
+    },
+    {
+      role: "user",
+      content: "Aşağıdaki sohbeti analiz et:\nÇalışan: Kusura bakmayın doktor beyin acil bir işi çıktı randevuyu iptal etmek zorundayız.\nMüşteri: Anladım, sorun değil geçmiş olsun."
+    },
+    {
+      role: "assistant",
+      content: '{\n  "memnuniyet": "nötr",\n  "duygu": "sakin",\n  "aciliyet": "orta",\n  "konu": "Doktorun acil durumu sebebiyle randevu iptali",\n  "ozet": "Klinik, doktorun acil durumu nedeniyle randevuyu iptal etti. Müşteri durumu anlayışla karşıladı.",\n  "temsilci_onerisi": "Doktor döndüğünde hastaya öncelikli yeni randevu oluşturulmalı.",\n  "aksiyon_gerekiyor_mu": true,\n  "sorumlular": ["Randevu Sorumlusu"]\n}'
+    }
+  ];
+
+  // LLM API'ye gönderilecek payload
+  const payload = {
+    model: "qwen2.5-7b-instruct-1m", // Kullanılan LLM modeli (değiştirilebilir)
+    temperature: 0.1, // Düşük: Analitik, deterministik, tutarlı yanıtlar için. Yaratıcılık istenmiyor.
+    max_tokens: 500, // Yanıtın uzunluğunu sınırlar. JSON çıktısı için yeterli, gereksiz uzamayı engeller.
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...fewShotExamples,
+      // Asıl analiz isteği: transcript formatında sohbet
+      { role: "user", content: `Aşağıdaki sohbeti analiz et:\n\n${chatTranscript}` }
+    ]
+  };
+
+  // ...fetch ile LLM API çağrısı ve JSON ayıklama işlemi...
+}
+```
+**Açıklama:**
+- **systemPrompt**: Modelin davranışını, kurallarını ve çıktı formatını kesin olarak belirler. Yanlış duygu/memnuniyet değerlendirmelerini önler.
+- **chatTranscript**: Sohbeti "Müşteri:" ve "Çalışan:" olarak etiketleyip, modelin bağlamı net anlamasını sağlar.
+- **fewShotExamples**: Modelin beklenen JSON formatını ve duygu tuzaklarını öğrenmesini sağlar. Yanlış örüntüleri engeller.
+- **model**: Hangi LLM kullanılacaksa burada seçilir. (qwen2.5-7b-instruct-1m örneği)
+- **temperature**: 0.1 seçildi çünkü analizde tutarlılık ve deterministik yanıtlar istenir. Yaratıcılık gereksiz.
+- **max_tokens**: Yanıtın uzunluğunu sınırlar. JSON çıktısı için 500 yeterli, hem maliyet hem de gereksiz uzama engellenir.
+- **messages**: LLM API'nin beklediği format. System prompt, örnekler ve asıl analiz isteği sırayla verilir.
+- **Yanıt işleme**: LLM bazen markdown veya açıklama ekleyebilir. Sadece geçerli JSON'u regex ile ayıklayıp döneriz.
+
+**Neden böyle?**
+- LLM'ler bazen istenmeyen açıklama veya formatta dönebilir. System prompt ve örneklerle modelin davranışı sıkı şekilde kontrol edilir.
+- Temperature ve max_tokens gibi parametreler, analiz senaryosunda en güvenli ve verimli sonucu almak için seçildi.
+
+---
+
+### 6. Main Export (Dışa Aktarım)
+```js
+export async function analyzeChatById(chatId) {
+  try {
+    const messages = await fetchAllMessages(chatId);
+    if (!messages || messages.length === 0) {
+      return { hata: "Sohbet kaydı bulunamadı" };
+    }
+    const chatMessages = prepareMessages(messages);
+    if (chatMessages.length === 0) {
+      return { hata: "İşlenecek geçerli metin mesajı yok" };
+    }
+    const result = await analyzeWithLM(chatMessages);
+    return result;
+  } catch (e) {
+    return { hata: e.message };
+  }
+}
+```
+**Açıklama:**
+- Tüm süreci birleştirir: veri çekme, temizleme, LLM ile analiz.
+- Hataları kullanıcıya açıkça döner.
+
+**Neden böyle?**
+UI'da bir butona bağlandığında, tek fonksiyonla tüm analiz zinciri çalışır. Hata yönetimi kolaydır.
+
+---
+
+### Entegrasyon Senaryosu
+- Bu kod, bir CRM sisteminde butona veya otomatik tetikleyiciye bağlanabilir.
+- Herhangi bir chatId ile çağrıldığında, ilgili sohbeti analiz edip özet, duygu, memnuniyet ve aksiyon önerisi gibi çıktılar üretir.
+- LLM modeli ve API adresi kolayca değiştirilebilir.
+
+---
+
+**Kritik Noktalar:**
+- Her adımda hata toleransı ve veri temizliği ön planda tutuldu.
+- LLM'e gönderilen veri, minimum karmaşa ve maksimum doğruluk için özenle hazırlandı.
+- Few-shot örneklerle modelin yanıt formatı ve duygu tuzakları önlendi.
+
+---
+
+> Daha fazla entegrasyon veya özelleştirme için kodun her fonksiyonu kolayca genişletilebilir.
 
 ### 1. MoviePitch — Film Fikri Üretici
 - Kullanıcıdan film fikri al
