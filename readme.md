@@ -973,6 +973,6 @@ Bu kurs LLM API temelini öğretti. Sıradaki konular:
 
 
 
-## Ayrıca bu repository de var olan bir projeye integrasyon ve sıfırdan bir proje bulunmaktadır
+## Ayrıca bu repository de var olan bir projeye entegrasyon ve sıfırdan bir proje bulunmaktadır
 
 > 💬 Sorularınız için GitHub Issues açabilirsiniz.
